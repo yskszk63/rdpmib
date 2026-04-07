@@ -9,3 +9,6 @@ thiserror = "2.0.18"
 url = "2.5.8"
 wry = "0.55.0"
 xdg = "3.0.0"
+
+[dev-dependencies]
+anyhow = "1.0.102"
