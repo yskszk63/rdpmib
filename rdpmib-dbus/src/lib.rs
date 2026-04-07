@@ -1,6 +1,3 @@
-use std::process;
-use std::process::Stdio;
-
 use base64::Engine;
 use dbus::MethodErr;
 use dbus::blocking::Connection;
@@ -9,6 +6,18 @@ use dbus_crossroads::Crossroads;
 use serde::Deserialize;
 use serde::Serialize;
 use url::Url;
+use thiserror::Error;
+
+struct RunContext<F>
+where F: FnMut(String) -> Result<String, String> + Send {
+    get_authcode: F,
+}
+
+#[derive(Debug, Error)]
+pub enum DBusError {
+    #[error("{0}")]
+    DBus(#[from] dbus::Error),
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -29,11 +38,12 @@ struct GetAccountsReply {
     accounts: Vec<Account>,
 }
 
-fn get_accounts(
+fn get_accounts<F>(
     _: &mut Context,
-    _: &mut (),
+    _: &mut RunContext<F>,
     (_, _, _): (String, String, String),
-) -> Result<(String,), MethodErr> {
+) -> Result<(String,), MethodErr>
+where F: FnMut(String) -> Result<String, String> + Send {
     let reply = GetAccountsReply {
         accounts: vec![Account {
             environment: None,
@@ -111,35 +121,6 @@ fn build_auth_url(params: &AuthParameters) -> Result<Url, MethodErr> {
     Ok(url)
 }
 
-fn get_authcode(url: &Url) -> Result<String, MethodErr> {
-    let mut prog = if cfg!(feature = "dev-stub") {
-        process::Command::new("cargo")
-    } else {
-        process::Command::new("rdpmib-authcode")
-    };
-
-    let prog = if cfg!(feature = "dev-stub") {
-        prog.arg("run").arg("--package").arg("rdpmib-authcode")
-    } else {
-        &mut prog
-    };
-
-    let output = prog
-        .arg(url.to_string())
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .output()
-        .map_err(|v| MethodErr::failed(&v.to_string()))?;
-
-    if !output.status.success() {
-        return Err(MethodErr::failed("failed to run rdpmib-authcode"));
-    }
-
-    let code = String::from_utf8(output.stdout).map_err(|v| MethodErr::failed(&v.to_string()))?;
-    Ok(code.trim().to_string())
-}
-
 #[derive(Debug, Serialize)]
 struct ReqCnf {
     kid: String,
@@ -185,11 +166,12 @@ fn get_token(params: &AuthParameters, code: &str, kid: &str) -> Result<String, M
     Ok(body.access_token)
 }
 
-fn acquire_token_silentry(
+fn acquire_token_silentry<F>(
     _: &mut Context,
-    _: &mut (),
+    cx: &mut RunContext<F>,
     (_, _, payload): (String, String, String),
-) -> Result<(String,), MethodErr> {
+) -> Result<(String,), MethodErr>
+where F: FnMut(String) -> Result<String, String> + Send {
     let payload = serde_json::from_str::<AcquireTokenSilentryPayload>(&payload)
         .map_err(|v| MethodErr::failed(&v.to_string()))?;
 
@@ -199,7 +181,7 @@ fn acquire_token_silentry(
 
     // https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/e967ebeb-9e9f-443e-857a-5208802943c2
     let url = build_auth_url(&payload.auth_parameters)?;
-    let code = get_authcode(&url)?;
+    let code = (cx.get_authcode)(url.to_string()).map_err(|s| MethodErr::failed(&s))?;
     let token = get_token(&payload.auth_parameters, &code, &pop.kid)?;
 
     let reply = AcquireTokenSilentryReply {
@@ -216,13 +198,14 @@ fn acquire_token_silentry(
     Ok((reply,))
 }
 
-fn main() -> anyhow::Result<()> {
+pub fn run<F>(get_authcode: F) -> Result<(), DBusError>
+where F: FnMut(String) -> Result<String, String> + Send + 'static {
     let conn = Connection::new_session()?;
     conn.request_name("com.microsoft.identity.broker1", false, false, false)?;
 
     let mut cr = Crossroads::new();
 
-    let token = cr.register::<(), _, _>("com.microsoft.identity.Broker1", |b| {
+    let token = cr.register::<RunContext<F>, _, _>("com.microsoft.identity.Broker1", |b| {
         b.method("getAccounts", ("a", "b", "c"), ("reply",), get_accounts);
         b.method(
             "acquireTokenSilently",
@@ -232,7 +215,8 @@ fn main() -> anyhow::Result<()> {
         );
     });
 
-    cr.insert("/com/microsoft/identity/broker1", &[token], ());
+    let cx = RunContext { get_authcode };
+    cr.insert("/com/microsoft/identity/broker1", &[token], cx);
 
     cr.serve(&conn)?;
     Ok(())
