@@ -175,6 +175,8 @@ where F: FnMut(String) -> Result<String, String> + Send {
     let payload = serde_json::from_str::<AcquireTokenSilentryPayload>(&payload)
         .map_err(|v| MethodErr::failed(&v.to_string()))?;
 
+    // TODO merge https://github.com/yskszk63/rdpmib/pull/4/changes
+
     let Some(pop) = &payload.auth_parameters.pop_params else {
         return Err(MethodErr::invalid_arg("no pop_params"));
     };
