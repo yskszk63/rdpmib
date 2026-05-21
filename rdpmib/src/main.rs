@@ -193,14 +193,18 @@ fn acquire_token_silentry(
     let payload = serde_json::from_str::<AcquireTokenSilentryPayload>(&payload)
         .map_err(|v| MethodErr::failed(&v.to_string()))?;
 
-    let Some(pop) = &payload.auth_parameters.pop_params else {
-        return Err(MethodErr::invalid_arg("no pop_params"));
-    };
+    //optional as RDS flow requires it, but AVD flow does not, and sso-mib doesn't send it.
+    let kid = payload
+        .auth_parameters
+        .pop_params
+        .as_ref()
+        .map(|p| p.kid.clone())
+        .unwrap_or_default();
 
     // https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/e967ebeb-9e9f-443e-857a-5208802943c2
     let url = build_auth_url(&payload.auth_parameters)?;
     let code = get_authcode(&url)?;
-    let token = get_token(&payload.auth_parameters, &code, &pop.kid)?;
+    let token = get_token(&payload.auth_parameters, &code, &kid)?;
 
     let reply = AcquireTokenSilentryReply {
         broker_token_response: BrokerTokenResponse {
